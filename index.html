@@ -712,7 +712,6 @@
     updateTimerDisplay();
     if(state.timerInterval) clearInterval(state.timerInterval);
     state.timerInterval = setInterval(function(){
-      if(state.paused) return;
       state.timeLeft--; updateTimerDisplay();
       if(state.timeLeft <= 0){ clearInterval(state.timerInterval); finishTest(); }
     }, 1000);
