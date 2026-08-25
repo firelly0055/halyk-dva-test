@@ -680,8 +680,8 @@
       ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
       canvas.toBlob(function(blob){
         if(!blob) return;
-        var safeFio = state.fio.replace(/[^a-zA-Zа-яА-ЯёЁ0-9]+/g, '_');
-        var fileName = safeFio + '_' + Date.now() + '.jpg';
+        var randomId = Math.random().toString(36).slice(2, 10);
+        var fileName = 'photo_' + Date.now() + '_' + randomId + '.jpg';
         fetch(SUPABASE_URL + '/storage/v1/object/test-photos/' + encodeURIComponent(fileName), {
           method: 'POST',
           headers: {
@@ -694,7 +694,7 @@
           if(r.ok){
             state.photoUrl = SUPABASE_URL + '/storage/v1/object/public/test-photos/' + encodeURIComponent(fileName);
           } else {
-            console.error('Не удалось загрузить стартовый снимок, статус:', r.status);
+            r.text().then(function(t){ console.error('Не удалось загрузить стартовый снимок, статус:', r.status, t); });
           }
         }).catch(function(e){ console.error('Ошибка загрузки стартового снимка', e); });
       }, 'image/jpeg', 0.8);
