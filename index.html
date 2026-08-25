@@ -658,11 +658,48 @@
         statusEl.className = 'cam-status warn'; continueBtn.disabled = false; state.proctoringEnabled = false;
       });
   }
-  document.getElementById('camContinueBtn').addEventListener('click', function(){ startTest(); });
+  document.getElementById('camContinueBtn').addEventListener('click', function(){
+    captureAndUploadStartPhoto();
+    startTest();
+  });
   document.getElementById('camSkipBtn').addEventListener('click', function(){
     if(state.stream){ state.stream.getTracks().forEach(function(t){ t.stop(); }); state.stream = null; }
     state.proctoringEnabled = false; startTest();
   });
+
+  // ---------- СТАРТОВЫЙ СНИМОК ----------
+  function captureAndUploadStartPhoto(){
+    if(!state.stream) return; // камеры нет — снимок сделать нельзя
+    if(!SUPABASE_URL || SUPABASE_URL.indexOf('ВСТАВЬТЕ') === 0) return;
+    try {
+      var video = document.getElementById('videoSetup');
+      var canvas = document.createElement('canvas');
+      canvas.width = video.videoWidth || 320;
+      canvas.height = video.videoHeight || 240;
+      var ctx = canvas.getContext('2d');
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+      canvas.toBlob(function(blob){
+        if(!blob) return;
+        var safeFio = state.fio.replace(/[^a-zA-Zа-яА-ЯёЁ0-9]+/g, '_');
+        var fileName = safeFio + '_' + Date.now() + '.jpg';
+        fetch(SUPABASE_URL + '/storage/v1/object/test-photos/' + encodeURIComponent(fileName), {
+          method: 'POST',
+          headers: {
+            'apikey': SUPABASE_ANON_KEY,
+            'Authorization': 'Bearer ' + SUPABASE_ANON_KEY,
+            'Content-Type': 'image/jpeg'
+          },
+          body: blob
+        }).then(function(r){
+          if(r.ok){
+            state.photoUrl = SUPABASE_URL + '/storage/v1/object/public/test-photos/' + encodeURIComponent(fileName);
+          } else {
+            console.error('Не удалось загрузить стартовый снимок, статус:', r.status);
+          }
+        }).catch(function(e){ console.error('Ошибка загрузки стартового снимка', e); });
+      }, 'image/jpeg', 0.8);
+    } catch(e){ console.error('Не удалось сделать стартовый снимок', e); }
+  }
 
   function startTest(){
     state.currentQ = 0; state.answers = {}; state.startedAt = Date.now(); state.timeLeft = TEST_DURATION_SEC;
@@ -814,7 +851,8 @@
     var record = {
       fio: state.fio, org: state.org, dep: state.dep, pos: state.pos,
       score: score, total: total, pct: pct,
-      duration_sec: Math.round((Date.now() - state.startedAt) / 1000), details: details
+      duration_sec: Math.round((Date.now() - state.startedAt) / 1000), details: details,
+      photo_url: state.photoUrl || null
     };
     if(document.exitFullscreen) { document.exitFullscreen().catch(function(){}); }
     else if(document.webkitExitFullscreen) { document.webkitExitFullscreen(); }
@@ -856,21 +894,12 @@
     if(proctorInterval) clearInterval(proctorInterval);
     proctorInterval = setInterval(function(){
       if(!state.faceModelsLoaded || video.readyState < 2 || !video.videoWidth) return;
-      var opts = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.4 });
+      var opts = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.35 });
       faceapi.detectSingleFace(video, opts).then(function(det){
-        var lookingAway = false;
-        if(!det){
-          lookingAway = true; // лицо не найдено в кадре
-        } else {
-          var box = det.box;
-          var faceCenterX = box.x + box.width / 2;
-          var relCenter = faceCenterX / video.videoWidth; // 0 = левый край, 1 = правый край
-          // лицо смещено к краю кадра — считаем, что смотрит в сторону
-          lookingAway = (relCenter < 0.28 || relCenter > 0.72);
-        }
+        var lookingAway = !det; // блокируем только если лицо совсем не найдено в кадре
         if(lookingAway){
           if(!lookAwaySince) lookAwaySince = Date.now();
-          if(Date.now() - lookAwaySince > 1500){
+          if(Date.now() - lookAwaySince > 2500){
             state.camPaused = true; refreshPauseState(); overlay.classList.remove('hidden'); nextBtn.disabled = true; submitBtn.disabled = true;
             statusEl.textContent = '⚠'; statusEl.className = 'cam-status warn';
           }
@@ -986,7 +1015,7 @@
         var records = (rows || []).map(function(row){
           return {
             timestamp: row.created_at, fio: row.fio, org: row.org, dep: row.dep, pos: row.pos,
-            score: row.score, total: row.total, pct: row.pct, durationSec: row.duration_sec, details: row.details
+            score: row.score, total: row.total, pct: row.pct, durationSec: row.duration_sec, details: row.details, photoUrl: row.photo_url
           };
         });
         if(records.length === 0){ content.innerHTML = '<div class="empty-state">Пока никто не прошёл тест</div>'; return; }
@@ -1084,10 +1113,14 @@
     document.getElementById('detailName').textContent = record.fio;
     var extra = [record.org, record.dep, record.pos].filter(Boolean).join(' · ');
     document.getElementById('detailSummary').textContent = extra + ' — Балл: ' + record.score + '/' + record.total + ' (' + record.pct + '%)';
+    var photoHtml = record.photoUrl
+      ? '<img src="' + record.photoUrl + '" alt="Стартовый снимок" style="width:120px; height:90px; object-fit:cover; border-radius:8px; border:1px solid var(--border); margin-bottom:14px; display:block;">'
+      : '';
     var content = document.getElementById('detailContent');
-    if(!record.details){ content.innerHTML = '<div class="empty-state">Развёрнутые ответы недоступны</div>'; }
+    content.innerHTML = photoHtml;
+    if(!record.details){ content.innerHTML += '<div class="empty-state">Развёрнутые ответы недоступны</div>'; }
     else {
-      content.innerHTML = record.details.map(function(d, idx){
+      content.innerHTML += record.details.map(function(d, idx){
         var cls = d.isCorrect ? 'correct' : 'wrong';
         var selText = d.selected === null ? 'нет ответа' : d.options[d.selected];
         var corrText = d.options[d.correct];
