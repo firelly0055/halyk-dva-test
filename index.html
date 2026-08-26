@@ -161,6 +161,7 @@
   .live-status { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 10px; margin-top: 4px; }
   .live-status.in_progress { background: #FDF3E0; color: #B8860B; }
   .live-status.completed { background: var(--success-bg); color: var(--success); }
+  .live-status.expired { background: var(--danger-bg); color: var(--danger); }
   .group-heading:first-child { margin-top: 0; }
   .pill { display: inline-block; padding: 2px 8px; border-radius: 12px; font-size: 12px; font-weight: 500; }
   .pill.high { background: var(--success-bg); color: var(--success); }
@@ -747,8 +748,8 @@
 
   // ---------- СЕССИЯ (для вкладки "кто проходит тест" в админ-панели) ----------
   function createSession(photoUrl){
-    if(!SUPABASE_URL || SUPABASE_URL.indexOf('ВСТАВЬТЕ') === 0) return;
-    fetch(SUPABASE_URL + '/rest/v1/sessions', {
+    if(!SUPABASE_URL || SUPABASE_URL.indexOf('ВСТАВЬТЕ') === 0){ state.sessionPromise = Promise.resolve(); return; }
+    state.sessionPromise = fetch(SUPABASE_URL + '/rest/v1/sessions', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -762,16 +763,22 @@
       .catch(function(e){ console.error('Не удалось создать сессию', e); });
   }
   function completeSession(){
-    if(!state.sessionId || !SUPABASE_URL || SUPABASE_URL.indexOf('ВСТАВЬТЕ') === 0) return;
-    fetch(SUPABASE_URL + '/rest/v1/sessions?id=eq.' + encodeURIComponent(state.sessionId), {
-      method: 'PATCH',
-      headers: {
-        'Content-Type': 'application/json',
-        'apikey': SUPABASE_ANON_KEY,
-        'Authorization': 'Bearer ' + SUPABASE_ANON_KEY
-      },
-      body: JSON.stringify({ status: 'completed' })
-    }).catch(function(e){ console.error('Не удалось обновить статус сессии', e); });
+    if(!SUPABASE_URL || SUPABASE_URL.indexOf('ВСТАВЬТЕ') === 0) return;
+    var doPatch = function(){
+      if(!state.sessionId) return; // сессию так и не удалось создать — ничего не поделать
+      fetch(SUPABASE_URL + '/rest/v1/sessions?id=eq.' + encodeURIComponent(state.sessionId), {
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': SUPABASE_ANON_KEY,
+          'Authorization': 'Bearer ' + SUPABASE_ANON_KEY
+        },
+        body: JSON.stringify({ status: 'completed' })
+      }).catch(function(e){ console.error('Не удалось обновить статус сессии', e); });
+    };
+    // ждём, пока завершится (успешно или нет) создание сессии, прежде чем пытаться её закрыть
+    if(state.sessionPromise){ state.sessionPromise.then(doPatch).catch(doPatch); }
+    else { doPatch(); }
   }
 
   function startTest(){
@@ -988,12 +995,27 @@
 
   document.getElementById('adminToggleBtn').addEventListener('click', function(){
     var pass = prompt('Пароль администратора:');
-    if(pass === ADMIN_PASSWORD){ loadAdminResults(); showScreen('admin'); }
+    if(pass === ADMIN_PASSWORD){
+      try { localStorage.setItem('dva_admin_session', '1'); } catch(e){}
+      loadAdminResults(); showScreen('admin');
+    }
     else if(pass !== null){ alert('Неверный пароль'); }
   });
-  document.getElementById('adminBackBtn').addEventListener('click', function(){ showScreen('login'); });
+  document.getElementById('adminBackBtn').addEventListener('click', function(){
+    try { localStorage.removeItem('dva_admin_session'); } catch(e){}
+    showScreen('login');
+  });
   document.getElementById('returnFullscreenBtn').addEventListener('click', function(){ requestFullscreenMode(); });
   document.getElementById('exportExcelBtn').addEventListener('click', exportResultsToExcel);
+
+  // Если админ уже входил ранее в этом браузере — не спрашиваем пароль заново при обновлении страницы
+  (function restoreAdminSession(){
+    try {
+      if(localStorage.getItem('dva_admin_session') === '1'){
+        loadAdminResults(); showScreen('admin');
+      }
+    } catch(e){}
+  })();
 
   function recordsToRows(records){
     return records.map(function(r, i){
@@ -1074,7 +1096,7 @@
 
   function fetchAdminResultsWithRetry(attemptsLeft){
     var content = document.getElementById('adminContent');
-    fetch(SUPABASE_URL + '/rest/v1/results?select=*&order=score.desc', {
+    fetch(SUPABASE_URL + '/rest/v1/results?select=id,created_at,fio,org,dep,pos,score,total,pct,duration_sec,photo_url&order=score.desc', {
       method: 'GET',
       headers: {
         'apikey': SUPABASE_ANON_KEY,
@@ -1088,8 +1110,8 @@
       .then(function(rows){
         var records = (rows || []).map(function(row){
           return {
-            timestamp: row.created_at, fio: row.fio, org: row.org, dep: row.dep, pos: row.pos,
-            score: row.score, total: row.total, pct: row.pct, durationSec: row.duration_sec, details: row.details, photoUrl: row.photo_url
+            id: row.id, timestamp: row.created_at, fio: row.fio, org: row.org, dep: row.dep, pos: row.pos,
+            score: row.score, total: row.total, pct: row.pct, durationSec: row.duration_sec, photoUrl: row.photo_url
           };
         });
         if(records.length === 0){ content.innerHTML = '<div class="empty-state">Пока никто не прошёл тест</div>'; return; }
@@ -1199,10 +1221,15 @@
     }).then(function(r){ return r.json(); })
       .then(function(rows){
         if(!rows || rows.length === 0){ content.innerHTML = '<div class="empty-state">Пока никто не начинал тест</div>'; return; }
-        var statusRu = { in_progress: 'Проходит сейчас', completed: 'Завершил(а)' };
+        var statusRu = { in_progress: 'Проходит сейчас', completed: 'Завершил(а)', expired: 'Не завершил(а) (истекло время)' };
         content.innerHTML = '<div class="live-grid">' + rows.map(function(s){
           var date = new Date(s.started_at);
           var dateStr = date.toLocaleDateString('ru-RU') + ' ' + date.toLocaleTimeString('ru-RU', {hour:'2-digit', minute:'2-digit'});
+          var effectiveStatus = s.status;
+          if(effectiveStatus === 'in_progress'){
+            var elapsedSec = (Date.now() - date.getTime()) / 1000;
+            if(elapsedSec > TEST_DURATION_SEC + 120){ effectiveStatus = 'expired'; } // +2 минуты запаса на сохранение результата
+          }
           var photoHtml = s.photo_url
             ? '<img src="' + s.photo_url + '" alt="">'
             : '<div class="no-photo">Нет фото</div>';
@@ -1210,7 +1237,7 @@
                  '<div class="live-card-body"><div class="live-card-name">' + escapeHtml(s.fio) + '</div>' +
                  '<div class="live-card-meta">' + escapeHtml(s.dep || s.org || '') + '</div>' +
                  '<div class="live-card-meta">' + dateStr + '</div>' +
-                 '<span class="live-status ' + s.status + '">' + (statusRu[s.status] || s.status) + '</span></div></div>';
+                 '<span class="live-status ' + effectiveStatus + '">' + (statusRu[effectiveStatus] || effectiveStatus) + '</span></div></div>';
         }).join('') + '</div>';
       }).catch(function(e){ console.error('Ошибка загрузки сессий', e); content.innerHTML = '<div class="empty-state">Ошибка загрузки</div>'; });
   }
@@ -1227,24 +1254,49 @@
       ? '<img src="' + record.photoUrl + '" alt="Стартовый снимок" style="width:120px; height:90px; object-fit:cover; border-radius:8px; border:1px solid var(--border); margin-bottom:14px; display:block;">'
       : '';
     var content = document.getElementById('detailContent');
-    content.innerHTML = photoHtml;
-    if(!record.details){ content.innerHTML += '<div class="empty-state">Развёрнутые ответы недоступны</div>'; }
-    else {
-      content.innerHTML += record.details.map(function(d, idx){
-        var cls = d.isCorrect ? 'correct' : 'wrong';
-        var selText = d.selected === null ? 'нет ответа' : d.options[d.selected];
-        var corrText = d.options[d.correct];
-        return '<div class="detail-row '+cls+'"><div class="detail-q">'+(idx+1)+'. '+escapeHtml(d.text)+'</div>' +
-               '<div class="detail-a '+(d.isCorrect ? 'correct-answer' : 'wrong-answer')+'">Ответ: '+escapeHtml(selText)+'</div>' +
-               (d.isCorrect ? '' : '<div class="detail-a correct-answer">Правильный: '+escapeHtml(corrText)+'</div>') + '</div>';
-      }).join('');
-    }
     showScreen('detail');
+
+    if(record.details){
+      content.innerHTML = photoHtml + renderDetailRows(record.details);
+      return;
+    }
+
+    content.innerHTML = photoHtml + '<div class="empty-state">Загрузка развёрнутых ответов…</div>';
+    if(!record.id || !SUPABASE_URL || SUPABASE_URL.indexOf('ВСТАВЬТЕ') === 0){
+      content.innerHTML = photoHtml + '<div class="empty-state">Развёрнутые ответы недоступны</div>';
+      return;
+    }
+    fetch(SUPABASE_URL + '/rest/v1/results?id=eq.' + encodeURIComponent(record.id) + '&select=details', {
+      headers: { 'apikey': SUPABASE_ANON_KEY, 'Authorization': 'Bearer ' + SUPABASE_ANON_KEY }
+    }).then(function(r){ return r.json(); })
+      .then(function(rows){
+        var details = (rows && rows[0]) ? rows[0].details : null;
+        record.details = details; // кэшируем в объекте, чтобы повторно не грузить
+        if(currentDetailRecord !== record) return; // человек уже открыл другую карточку — не перезаписываем экран
+        content.innerHTML = photoHtml + (details ? renderDetailRows(details) : '<div class="empty-state">Развёрнутые ответы недоступны</div>');
+      })
+      .catch(function(e){
+        console.error('Не удалось загрузить развёрнутые ответы', e);
+        if(currentDetailRecord !== record) return;
+        content.innerHTML = photoHtml + '<div class="empty-state">Ошибка загрузки развёрнутых ответов</div>';
+      });
+  }
+
+  function renderDetailRows(details){
+    return details.map(function(d, idx){
+      var cls = d.isCorrect ? 'correct' : 'wrong';
+      var selText = d.selected === null ? 'нет ответа' : d.options[d.selected];
+      var corrText = d.options[d.correct];
+      return '<div class="detail-row '+cls+'"><div class="detail-q">'+(idx+1)+'. '+escapeHtml(d.text)+'</div>' +
+             '<div class="detail-a '+(d.isCorrect ? 'correct-answer' : 'wrong-answer')+'">Ответ: '+escapeHtml(selText)+'</div>' +
+             (d.isCorrect ? '' : '<div class="detail-a correct-answer">Правильный: '+escapeHtml(corrText)+'</div>') + '</div>';
+    }).join('');
   }
 
   document.getElementById('exportOneExcelBtn').addEventListener('click', function(){
     if(typeof XLSX === 'undefined'){ alert('Библиотека для экспорта не загрузилась. Проверьте соединение и попробуйте снова.'); return; }
     if(!currentDetailRecord){ alert('Нет данных для выгрузки.'); return; }
+    if(!currentDetailRecord.details){ alert('Развёрнутые ответы ещё загружаются — подождите пару секунд и попробуйте снова.'); return; }
     var r = currentDetailRecord;
     var wb = XLSX.utils.book_new();
 
