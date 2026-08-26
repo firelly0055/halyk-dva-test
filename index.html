@@ -358,6 +358,12 @@
       <p>Тест приостановлен — смотрите на экран, чтобы продолжить</p>
     </div>
 
+    <div class="pause-overlay hidden" id="cameraLostOverlay">
+      <div style="font-size:28px;">📷</div>
+      <p>Камера была отключена браузером (например, после долгого бездействия вкладки).<br>Нажмите кнопку, чтобы переподключить камеру и продолжить тест.</p>
+      <button class="btn" id="reconnectCamBtn" style="max-width:260px; margin-top:12px;">Переподключить камеру</button>
+    </div>
+
     <div class="pause-overlay hidden" id="fullscreenOverlay">
       <div style="font-size:28px;">⛶</div>
       <p>Тест приостановлен — вы вышли из полноэкранного режима.<br>Нажмите кнопку, чтобы вернуться и продолжить.</p>
@@ -965,16 +971,30 @@
       });
   }
 
-  var lookAwaySince = null, proctorInterval = null;
+  var lookAwaySince = null, proctorInterval = null, videoStalledSince = null;
   function startProctoringLoop(){
     var video = document.getElementById('videoTest');
     var statusEl = document.getElementById('camTestStatus');
     var overlay = document.getElementById('pauseOverlay');
+    var lostOverlay = document.getElementById('cameraLostOverlay');
     var nextBtn = document.getElementById('nextBtn');
     var submitBtn = document.getElementById('submitBtn');
     if(proctorInterval) clearInterval(proctorInterval);
     proctorInterval = setInterval(function(){
-      if(!state.faceModelsLoaded || video.readyState < 2 || !video.videoWidth) return;
+      if(!state.faceModelsLoaded) return;
+      if(video.readyState < 2 || !video.videoWidth){
+        if(!videoStalledSince) videoStalledSince = Date.now();
+        if(Date.now() - videoStalledSince > 5000 && !state.cameraLost){
+          // видеопоток "умер" (браузер мог остановить камеру после долгого бездействия вкладки) —
+          // просто ждать бессмысленно, нужна явная переподключение с жестом пользователя
+          state.cameraLost = true; state.camPaused = true; refreshPauseState();
+          overlay.classList.add('hidden'); lostOverlay.classList.remove('hidden');
+          nextBtn.disabled = true; submitBtn.disabled = true;
+          statusEl.textContent = '✕'; statusEl.className = 'cam-status warn';
+        }
+        return;
+      }
+      videoStalledSince = null;
       var opts = new faceapi.TinyFaceDetectorOptions({ inputSize: 224, scoreThreshold: 0.35 });
       faceapi.detectSingleFace(video, opts).then(function(det){
         var lookingAway = !det; // блокируем только если лицо совсем не найдено в кадре
@@ -992,6 +1012,25 @@
       }).catch(function(err){ console.error('Ошибка распознавания лица', err); });
     }, 500);
   }
+
+  document.getElementById('reconnectCamBtn').addEventListener('click', function(){
+    var lostOverlay = document.getElementById('cameraLostOverlay');
+    var video = document.getElementById('videoTest');
+    if(state.stream){ state.stream.getTracks().forEach(function(t){ try{ t.stop(); }catch(e){} }); }
+    navigator.mediaDevices.getUserMedia({ video: { width: { ideal: 320 }, height: { ideal: 240 } } })
+      .then(function(newStream){
+        state.stream = newStream;
+        video.srcObject = newStream;
+        videoStalledSince = null; lookAwaySince = null;
+        state.cameraLost = false; state.camPaused = false; refreshPauseState();
+        lostOverlay.classList.add('hidden');
+        if(!state.fsPaused){ document.getElementById('nextBtn').disabled = false; document.getElementById('submitBtn').disabled = false; }
+      })
+      .catch(function(err){
+        console.error('Не удалось переподключить камеру', err);
+        alert('Не удалось переподключить камеру. Проверьте, что она не занята другим приложением, и попробуйте ещё раз.');
+      });
+  });
 
   document.getElementById('adminToggleBtn').addEventListener('click', function(){
     var pass = prompt('Пароль администратора:');
